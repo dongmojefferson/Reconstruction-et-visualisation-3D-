@@ -30,6 +30,7 @@ L'objectif principal est de fusionner des données hétérogènes (vecteurs 2D e
    - Json (Génération standardisée du fichier de sortie Cityjson)
 ## Répartition des tâches dans l’équipe
 Jefferson Dongmo Somtsi : Développement de la structure CityJSON et validation de la visualisation 3D.
+
 Qarek Mbengmo Donfack :  Développement de la logique d'analyse.
 ## Questions à résoudre
 Question #1 (Optimisation Rendu) : Le format CityJSON génère une géométrie explicite pour chaque arbre, ce qui rend le fichier lourd (> 20 millions d'arbres sur notre zone d'étude) et Qgis plante lors de l'affichage. Peut-on enrgistrer les bâtis en geojson et la végétation exporter en points au format GeoPackage puis les afficher avec la symbologie de modèle 3D de QGIS ?
