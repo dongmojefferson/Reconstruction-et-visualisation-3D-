@@ -4,7 +4,7 @@ Ce projet vise à développer un pipeline de traitement géospatial entièrement
 
 L'objectif principal est de fusionner des données hétérogènes (vecteurs 2D et rasters d'élévation) pour générer une scène 3D sémantique standardisée. Le script doit :
 
-* Calculer précisément la hauteur des bâtiments (LoD1) par analyse zonale.
+* Calculer précisément la hauteur des bâtiments par analyse zonale.
 
 * Reconstituer la végétation dense (forêt) et les arbres isolés.
 
