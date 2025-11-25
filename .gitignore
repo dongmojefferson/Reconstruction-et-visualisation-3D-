@@ -1,0 +1,14 @@
+# Ignorer les fichiers de données volumineux
+*.tif
+*.tiff
+*.geotiff
+*.geojson
+*.gpkg
+*.city.json
+*.json
+
+# Ignorer les fichiers systèmes et python
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
