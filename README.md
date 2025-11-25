@@ -10,7 +10,7 @@ L'objectif principal est de fusionner des données hétérogènes (vecteurs 2D e
 
 * Exporter le résultat au format CityJSON 2.0 pour assurer l'interopérabilité et la conservation des attributs sémantiques.
 ## Données utilisées
-| Source | Type | Format | Utilité |
+| Source | type | Format | Utilité |
 | :--- | :--- | :--- | :--- |
 | **MNEHR (MNS)** | Raster (1 m) | GeoTIFF | Modèle Numérique de Surface : fournit l'altitude des toits et de la canopée. |
 | **MNEHR (MNT)** | Raster (1 m) | GeoTIFF | Modèle Numérique de Terrain : fournit l'altitude du sol nu ($Z_{base}$). |
