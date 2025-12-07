@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+Script d'analyse pour GitHub Actions
+Analyse les résultats du pipeline et génère un rapport
+"""
+
+import json
+import sys
+import glob
+from pathlib import Path
+import geopandas as gpd
+import rasterio
+from datetime import datetime
+
+def analyze_pipeline_results(output_dir="output"):
+    """Analyse les résultats du pipeline et génère un rapport"""
+    
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "status": "unknown",
+        "metrics": {},
+        "files": [],
+        "errors": []
+    }
+    
+    try:
+        # Recherche des fichiers de sortie
+        geojson_files = glob.glob(f"{output_dir}/*.geojson")
+        gpkg_files = glob.glob(f"{output_dir}/*.gpkg")
+        all_files = geojson_files + gpkg_files
+        
+        report["files"] = all_files
+        
+        if not all_files:
+            report["status"] = "warning"
+            report["errors"].append("Aucun fichier de sortie trouvé")
+            return report
+        
+        # Analyse des fichiers GeoJSON (bâtiments)
+        for geojson in geojson_files:
+            try:
+                gdf = gpd.read_file(geojson)
+                report["metrics"][Path(geojson).stem] = {
+                    "type": "geojson",
+                    "feature_count": len(gdf),
+                    "crs": str(gdf.crs),
+                    "bounds": gdf.total_bounds.tolist()
+                }
+                
+                # Métriques spécifiques pour bâtiments
+                if "hauteur" in gdf.columns:
+                    report["metrics"][Path(geojson).stem].update({
+                        "avg_height": float(gdf["hauteur"].mean()),
+                        "max_height": float(gdf["hauteur"].max()),
+                        "min_height": float(gdf["hauteur"].min())
+                    })
+                    
+            except Exception as e:
+                report["errors"].append(f"Erreur analyse {geojson}: {str(e)}")
+        
+        # Analyse des fichiers GeoPackage (végétation)
+        for gpkg in gpkg_files:
+            try:
+                gdf = gpd.read_file(gpkg)
+                report["metrics"][Path(gpkg).stem] = {
+                    "type": "geopackage",
+                    "feature_count": len(gdf),
+                    "crs": str(gdf.crs)
+                }
+            except Exception as e:
+                report["errors"].append(f"Erreur analyse {gpkg}: {str(e)}")
+        
+        # Détermine le statut global
+        if report["errors"]:
+            report["status"] = "error"
+        elif all_files:
+            report["status"] = "success"
+        else:
+            report["status"] = "partial"
+        
+        return report
+        
+    except Exception as e:
+        report["status"] = "error"
+        report["errors"].append(f"Erreur générale: {str(e)}")
+        return report
+
+def generate_summary(report):
+    """Génère un résumé formaté pour GitHub Actions"""
+    
+    summary = f"""
+#  Rapport d'analyse du Pipeline 3D
+
+**Statut:** {report['status'].upper()}
+**Date:** {report['timestamp']}
+
+##  Fichiers générés
+"""
+    
+    for file in report["files"]:
+        summary += f"- `{file}`\n"
+    
+    summary += "\n##  Métriques\n"
+    
+    for name, metrics in report["metrics"].items():
+        summary += f"\n### {name}\n"
+        summary += f"- Type: {metrics['type']}\n"
+        summary += f"- Nombre d'éléments: {metrics['feature_count']}\n"
+        
+        if "avg_height" in metrics:
+            summary += f"- Hauteur moyenne: {metrics['avg_height']:.2f}m\n"
+            summary += f"- Hauteur max: {metrics['max_height']:.2f}m\n"
+    
+    if report["errors"]:
+        summary += "\n##  Erreurs\n"
+        for error in report["errors"]:
+            summary += f"- {error}\n"
+    
+    return summary
+
+def main():
+    # Analyse les résultats
+    report = analyze_pipeline_results()
+    
+    # Génère le rapport JSON
+    with open("pipeline-report.json", "w") as f:
+        json.dump(report, f, indent=2)
+    
+    # Génère le résumé pour GitHub Actions
+    summary = generate_summary(report)
+    print(summary)
+    
+    # Écrit dans le fichier de résumé GitHub
+    with open(Path(os.environ.get('GITHUB_STEP_SUMMARY', 'summary.md')), "w") as f:
+        f.write(summary)
+    
+    # Sortie avec le code approprié
+    if report["status"] == "error":
+        sys.exit(1)
+    elif report["status"] == "warning":
+        sys.exit(0)  # Warning mais OK
+    else:
+        sys.exit(0)
+
+if __name__ == "__main__":
+    import os
+    main()
