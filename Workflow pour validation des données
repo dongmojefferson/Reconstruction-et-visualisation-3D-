@@ -1,0 +1,41 @@
+name: Validate Geospatial Data
+
+on:
+  push:
+    paths:
+      - 'data/**'
+      - 'config/**'
+  pull_request:
+    paths:
+      - 'data/**'
+      - 'config/**'
+
+jobs:
+  validate-data:
+    name:  Validation des données
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name:  Checkout code
+      uses: actions/checkout@v3
+    
+    - name:  Setup Python
+      uses: actions/setup-python@v4
+    
+    - name:  Install GDAL et dépendances
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gdal-bin libgdal-dev
+        pip install rasterio geopandas pyproj
+    
+    - name:  Validate raster files
+      run: |
+        python .github/scripts/validate_data.py --type raster --path data/
+    
+    - name:  Validate vector files
+      run: |
+        python .github/scripts/validate_data.py --type vector --path data/
+    
+    - name:  Validate configuration
+      run: |
+        python .github/scripts/validate_config.py config/
