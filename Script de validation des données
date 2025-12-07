@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""
+Validation des données géospatiales pour GitHub Actions
+"""
+
+import sys
+import json
+import glob
+from pathlib import Path
+import rasterio
+import geopandas as gpd
+
+def validate_raster_file(filepath):
+    """Valide un fichier raster"""
+    try:
+        with rasterio.open(filepath) as src:
+            info = {
+                "file": str(filepath),
+                "valid": True,
+                "width": src.width,
+                "height": src.height,
+                "crs": str(src.crs),
+                "bounds": src.bounds,
+                "dtype": src.dtypes[0],
+                "count": src.count
+            }
+            return info
+    except Exception as e:
+        return {
+            "file": str(filepath),
+            "valid": False,
+            "error": str(e)
+        }
+
+def validate_vector_file(filepath):
+    """Valide un fichier vectoriel"""
+    try:
+        gdf = gpd.read_file(filepath)
+        info = {
+            "file": str(filepath),
+            "valid": True,
+            "feature_count": len(gdf),
+            "geometry_type": gdf.geometry.type.unique().tolist(),
+            "crs": str(gdf.crs),
+            "columns": gdf.columns.tolist()
+        }
+        return info
+    except Exception as e:
+        return {
+            "file": str(filepath),
+            "valid": False,
+            "error": str(e)
+        }
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Validation des données géospatiales")
+    parser.add_argument("--type", choices=["raster", "vector", "all"], required=True)
+    parser.add_argument("--path", type=str, required=True)
+    
+    args = parser.parse_args()
+    
+    results = {
+        "valid": [],
+        "invalid": []
+    }
+    
+    # Recherche des fichiers
+    if args.type in ["raster", "all"]:
+        raster_files = glob.glob(f"{args.path}/**/*.tif", recursive=True)
+        raster_files += glob.glob(f"{args.path}/**/*.tiff", recursive=True)
+        
+        for raster in raster_files:
+            validation = validate_raster_file(raster)
+            if validation["valid"]:
+                results["valid"].append(validation)
+            else:
+                results["invalid"].append(validation)
+    
+    if args.type in ["vector", "all"]:
+        vector_files = glob.glob(f"{args.path}/**/*.geojson", recursive=True)
+        vector_files += glob.glob(f"{args.path}/**/*.gpkg", recursive=True)
+        vector_files += glob.glob(f"{args.path}/**/*.shp", recursive=True)
+        
+        for vector in vector_files:
+            validation = validate_vector_file(vector)
+            if validation["valid"]:
+                results["valid"].append(validation)
+            else:
+                results["invalid"].append(validation)
+    
+    # Génère un rapport
+    print("##  Rapport de validation des données")
+    print(f"**Fichiers valides:** {len(results['valid'])}")
+    print(f"**Fichiers invalides:** {len(results['invalid'])}")
+    
+    if results["invalid"]:
+        print("\n###  Fichiers invalides:")
+        for invalid in results["invalid"]:
+            print(f"- {invalid['file']}: {invalid['error']}")
+    
+    # Écrit le rapport JSON
+    with open("data-validation-report.json", "w") as f:
+        json.dump(results, f, indent=2)
+    
+    # Retourne un code d'erreur si des fichiers sont invalides
+    if results["invalid"]:
+        sys.exit(1)
+    else:
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
