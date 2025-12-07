@@ -1,0 +1,541 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+GMQ710 - PROJET FINAL : Pipeline 3D avec zone personnalisable
+Solution : Bâtiments en GeoJSON + Végétation en GeoPackage (points)
+"""
+
+import os
+import json
+import numpy as np
+import geopandas as gpd
+import rasterio
+from rasterio.features import rasterize
+from rasterio.windows import Window
+from shapely.geometry import Point, Polygon, box
+from pyproj import Transformer
+
+# ------------------------------------------------------------------------------
+# 1. CONFIGURATION - À MODIFIER SELON VOS BESOINS
+# ------------------------------------------------------------------------------
+BASE_PATH = r"C:\Users\QAREK MBENGMO\Desktop\GMQ710\TD2\Donnees sources"
+
+# Fichiers d'entrée
+DSM_FILE = "dsm_1m_utm19_w_22_102.tif"
+DTM_FILE = "dtm_1m_utm19_w_22_102.tif"
+OSM_FILE = "buildings_sherbrooke_osm.geojson"
+
+# Fichiers de sortie
+BUILDINGS_OUTPUT = "batiments_3d_sherbrooke.geojson"
+VEGETATION_OUTPUT = "vegetation_points_sherbrooke.gpkg"
+
+# Paramètres techniques
+TARGET_CRS_EPSG = 26919  # UTM 19N
+TARGET_CRS = f'EPSG:{TARGET_CRS_EPSG}'
+WGS84_CRS = 'EPSG:4326'  # Latitude/Longitude
+
+MIN_HEIGHT_BLD = 3.0      # Hauteur minimale d'un bâtiment (m)
+MIN_HEIGHT_TREE = 2.5     # Hauteur minimale de végétation (m)
+
+# ------------------------------------------------------------------------------
+# 2. DÉFINITION DE LA ZONE D'ÉTUDE - MODIFIEZ ICI !
+# ------------------------------------------------------------------------------
+# Format : longitude,latitude (WGS84)
+# Exemple : [-71.932847,45.381367],[-71.920931,45.381307],[-71.932892,45.375654],[-71.921444,45.376154]
+
+# Définir vos points au format longitude,latitude
+WGS84_COORDS = [
+    [-71.932847, 45.381367],  # Point 1
+    [-71.920931, 45.381307],  # Point 2  
+    [-71.924029, 45.375547],  # Point 3
+    [-71.921444, 45.376154]   # Point 4
+]
+
+BUFFER_DISTANCE = 20  # Buffer en mètres (recommandé: 20)
+
+# ------------------------------------------------------------------------------
+# 3. FONCTIONS PRINCIPALES
+# ------------------------------------------------------------------------------
+
+def get_raster_bounds(raster_path):
+    """Récupère les limites d'un raster"""
+    with rasterio.open(raster_path) as src:
+        return src.bounds, src.crs
+
+def wgs84_to_utm(coords_wgs84, target_crs_epsg=26919):
+    """Convertit des coordonnées WGS84 (lon,lat) en UTM"""
+    transformer = Transformer.from_crs(WGS84_CRS, f'EPSG:{target_crs_epsg}', always_xy=True)
+    
+    # Convertir chaque point
+    coords_utm = []
+    for lon, lat in coords_wgs84:
+        x, y = transformer.transform(lon, lat)
+        coords_utm.append((x, y))
+    
+    return coords_utm
+
+def create_utm_zone_from_points(points_utm):
+    """Crée une zone UTM rectangulaire à partir de points"""
+    if not points_utm:
+        return None
+    
+    # Extraire tous les x et y
+    x_coords = [pt[0] for pt in points_utm]
+    y_coords = [pt[1] for pt in points_utm]
+    
+    # Créer une boîte englobante
+    xmin, xmax = min(x_coords), max(x_coords)
+    ymin, ymax = min(y_coords), max(y_coords)
+    
+    return (xmin, ymin, xmax, ymax)
+
+def validate_and_adjust_zone(zone_coords, raster_bounds):
+    """Valide et ajuste la zone aux limites du raster"""
+    xmin, ymin, xmax, ymax = zone_coords
+    
+    # Vérifier l'ordre
+    if xmin >= xmax:
+        xmin, xmax = xmax, xmin
+    if ymin >= ymax:
+        ymin, ymax = ymax, ymin
+    
+    # Ajuster aux limites
+    xmin = max(raster_bounds.left, xmin)
+    ymin = max(raster_bounds.bottom, ymin)
+    xmax = min(raster_bounds.right, xmax)
+    ymax = min(raster_bounds.top, ymax)
+    
+    return (xmin, ymin, xmax, ymax)
+
+def crop_raster_to_area(raster_path, study_area):
+    """Recadre un raster à la zone d'étude"""
+    xmin, ymin, xmax, ymax = study_area
+    
+    try:
+        with rasterio.open(raster_path) as src:
+            # Convertir coordonnées en indices de pixels
+            row_start, col_start = src.index(xmin, ymax)  # Coin NW
+            row_end, col_end = src.index(xmax, ymin)      # Coin SE
+            
+            # S'assurer du bon ordre
+            row_start, row_end = sorted([int(row_start), int(row_end)])
+            col_start, col_end = sorted([int(col_start), int(col_end)])
+            
+            # Limiter aux dimensions
+            row_start = max(0, row_start)
+            col_start = max(0, col_start)
+            row_end = min(src.height - 1, row_end)
+            col_end = min(src.width - 1, col_end)
+            
+            # Calculer la taille
+            height = row_end - row_start + 1
+            width = col_end - col_start + 1
+            
+            if width <= 0 or height <= 0:
+                print(f"❌ Fenêtre invalide: {width}x{height} pixels")
+                return None, None
+            
+            # Créer la fenêtre
+            window = Window(col_start, row_start, width, height)
+            
+            # Lire les données
+            data = src.read(1, window=window)
+            transform = src.window_transform(window)
+            
+            print(f"   ✅ {data.shape[1]}×{data.shape[0]} pixels")
+            return data, transform
+            
+    except Exception as e:
+        print(f"❌ Erreur recadrage: {e}")
+        return None, None
+
+def create_building_3d_geojson(polygon, z_base, height):
+    """Crée une géométrie 3D pour GeoJSON"""
+    try:
+        coords_3d = []
+        for x, y in polygon.exterior.coords:
+            coords_3d.append([x, y, z_base])
+        return {
+            "type": "Polygon", 
+            "coordinates": [coords_3d]
+        }
+    except Exception as e:
+        print(f"⚠️ Erreur géométrie 3D: {e}")
+        return None
+
+def process_vegetation_points(ndsm, dtm, mask_buildings, transform, min_height):
+    """Extrait la végétation sous forme de points"""
+    veg_mask = (ndsm > min_height) & (mask_buildings == 0)
+    rows, cols = np.where(veg_mask)
+    
+    print(f"   🌳 Pixels végétation: {len(rows):,}")
+    
+    if len(rows) == 0:
+        return gpd.GeoDataFrame()
+    
+    # Limite pour éviter les fichiers trop gros
+    MAX_POINTS = 100000
+    if len(rows) > MAX_POINTS:
+        step = max(1, len(rows) // MAX_POINTS)
+        rows = rows[::step]
+        cols = cols[::step]
+        print(f"   🔽 Échantillonnage: 1 point sur {step}")
+    
+    points_data = []
+    for r, c in zip(rows, cols):
+        try:
+            height_val = float(ndsm[r, c])
+            z_base = float(dtm[r, c])
+            x, y = rasterio.transform.xy(transform, r, c, offset='center')
+            
+            points_data.append({
+                'geometry': Point(x, y),
+                'hauteur': round(height_val, 2),
+                'z_base': round(z_base, 2),
+                'type_veg': 'arbre'
+            })
+        except:
+            continue
+    
+    if points_data:
+        return gpd.GeoDataFrame(points_data, crs=TARGET_CRS)
+    return gpd.GeoDataFrame()
+
+# ------------------------------------------------------------------------------
+# 4. EXÉCUTION PRINCIPALE
+# ------------------------------------------------------------------------------
+
+def main():
+    print("=" * 60)
+    print("GMQ710 - RECONSTRUCTION 3D")
+    print("=" * 60)
+    
+    # Chemins complets
+    dsm_path = os.path.join(BASE_PATH, DSM_FILE)
+    dtm_path = os.path.join(BASE_PATH, DTM_FILE)
+    osm_path = os.path.join(BASE_PATH, OSM_FILE)
+    
+    # Vérification des fichiers
+    for path in [dsm_path, dtm_path, osm_path]:
+        if not os.path.exists(path):
+            print(f"❌ Fichier manquant: {os.path.basename(path)}")
+            return
+    
+    # 1. Conversion des coordonnées WGS84 vers UTM
+    print("\n📍 CONVERSION DES COORDONNÉES...")
+    print(f"   📍 Points WGS84 (lon,lat):")
+    for i, (lon, lat) in enumerate(WGS84_COORDS, 1):
+        print(f"     Point {i}: {lon:.6f}, {lat:.6f}")
+    
+    utm_coords = wgs84_to_utm(WGS84_COORDS, TARGET_CRS_EPSG)
+    print(f"\n   🗺️  Points UTM {TARGET_CRS_EPSG} (x,y):")
+    for i, (x, y) in enumerate(utm_coords, 1):
+        print(f"     Point {i}: {x:.2f}, {y:.2f}")
+    
+    # Créer la zone UTM à partir des points
+    study_area_utm = create_utm_zone_from_points(utm_coords)
+    
+    # 2. Obtenir les limites du raster
+    print("\n📍 ANALYSE DES DONNÉES RASTER...")
+    raster_bounds, raster_crs = get_raster_bounds(dsm_path)
+    
+    if raster_bounds is None:
+        print("❌ Impossible de lire le DSM")
+        return
+    
+    print(f"   📏 Étendue totale du raster: {raster_bounds}")
+    print(f"   🗺️  CRS: {raster_crs}")
+    
+    # 3. Appliquer le buffer à la zone
+    print(f"\n🗺️  CONFIGURATION DE LA ZONE")
+    xmin, ymin, xmax, ymax = study_area_utm
+    
+    # Appliquer le buffer
+    if BUFFER_DISTANCE > 0:
+        xmin -= BUFFER_DISTANCE
+        ymin -= BUFFER_DISTANCE
+        xmax += BUFFER_DISTANCE
+        ymax += BUFFER_DISTANCE
+        print(f"   📏 Buffer appliqué: {BUFFER_DISTANCE}m")
+    
+    # Valider et ajuster la zone
+    study_area = validate_and_adjust_zone((xmin, ymin, xmax, ymax), raster_bounds)
+    
+    width = study_area[2] - study_area[0]
+    height = study_area[3] - study_area[1]
+    area = width * height
+    
+    print(f"   📐 Zone finale UTM {TARGET_CRS_EPSG}:")
+    print(f"     X: {study_area[0]:.0f} → {study_area[2]:.0f} ({width:.0f}m)")
+    print(f"     Y: {study_area[1]:.0f} → {study_area[3]:.0f} ({height:.0f}m)")
+    print(f"     Surface: {area:.0f} m² ({area/10000:.1f} ha)")
+    
+    if area <= 0:
+        print("❌ Zone invalide après ajustement")
+        return
+    
+    # Convertir la zone UTM en WGS84 pour l'affichage
+    transformer_to_wgs = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
+    lon_min, lat_min = transformer_to_wgs.transform(study_area[0], study_area[1])
+    lon_max, lat_max = transformer_to_wgs.transform(study_area[2], study_area[3])
+    
+    print(f"\n   🌐 Zone équivalente WGS84 (lon,lat):")
+    print(f"     Longitude: {lon_min:.6f} → {lon_max:.6f}")
+    print(f"     Latitude: {lat_min:.6f} → {lat_max:.6f}")
+    
+    # 4. Recadrage des rasters
+    print("\n🔪 RECADRAGE DES RASTERS...")
+    
+    dsm, dsm_transform = crop_raster_to_area(dsm_path, study_area)
+    if dsm is None:
+        return
+    
+    dtm, dtm_transform = crop_raster_to_area(dtm_path, study_area)
+    if dtm is None:
+        return
+    
+    # Ajustement des dimensions si nécessaire
+    if dsm.shape != dtm.shape:
+        print("   ⚠️ Ajustement des dimensions...")
+        min_height = min(dsm.shape[0], dtm.shape[0])
+        min_width = min(dsm.shape[1], dtm.shape[1])
+        dsm = dsm[:min_height, :min_width]
+        dtm = dtm[:min_height, :min_width]
+    
+    # 5. Calcul du nDSM
+    print("\n📊 CALCUL DES HAUTEURS...")
+    ndsm = dsm - dtm
+    ndsm[ndsm < 0] = 0
+    
+    valid_heights = ndsm[ndsm > 0]
+    if len(valid_heights) > 0:
+        print(f"   📈 Hauteur max: {valid_heights.max():.1f}m")
+        print(f"   📉 Hauteur moyenne: {valid_heights.mean():.1f}m")
+    else:
+        print("   ⚠️ Aucune hauteur positive détectée")
+    
+    # 6. Chargement et filtrage des bâtiments
+    print("\n🏢 TRAITEMENT DES BÂTIMENTS...")
+    
+    buildings_gdf = gpd.read_file(osm_path)
+    if buildings_gdf.crs is None or str(buildings_gdf.crs) != TARGET_CRS:
+        buildings_gdf = buildings_gdf.to_crs(TARGET_CRS)
+    
+    # Filtrer dans la zone
+    zone_box = box(*study_area)
+    buildings_in_zone = buildings_gdf[buildings_gdf.intersects(zone_box)].copy()
+    
+    print(f"   🏛️  Bâtiments dans la zone: {len(buildings_in_zone)}/{len(buildings_gdf)}")
+    
+    # 7. Traitement des bâtiments
+    mask_buildings = np.zeros(dsm.shape, dtype='uint8')
+    buildings_3d_data = []
+    
+    for idx, row in buildings_in_zone.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        
+        try:
+            # Rasterisation pour extraction de hauteur
+            mask_b = rasterize([geom], out_shape=dsm.shape, 
+                             transform=dsm_transform, fill=0, 
+                             default_value=1, dtype='uint8')
+            mask_buildings = np.maximum(mask_buildings, mask_b)
+            
+            # Extraction hauteur
+            h_vals = ndsm[mask_b == 1]
+            if h_vals.size == 0:
+                continue
+            
+            h_bat = float(np.percentile(h_vals[h_vals > 0], 90))
+            z_base = float(dtm[mask_b == 1].min())
+            
+            if h_bat >= MIN_HEIGHT_BLD:
+                simple_geom = geom.simplify(1.0, preserve_topology=True)
+                
+                # Gérer MultiPolygon
+                if simple_geom.geom_type == 'Polygon':
+                    polygons = [simple_geom]
+                else:
+                    polygons = list(simple_geom.geoms)
+                
+                for poly in polygons:
+                    geom_3d = create_building_3d_geojson(poly, z_base, h_bat)
+                    if geom_3d:
+                        buildings_3d_data.append({
+                            'type': 'Feature',
+                            'properties': {
+                                'id': f"bat_{idx}",
+                                'hauteur': round(h_bat, 2),
+                                'z_base': round(z_base, 2),
+                                'surface': round(poly.area, 1)
+                            },
+                            'geometry': geom_3d
+                        })
+                        
+        except Exception as e:
+            continue
+    
+    # 8. Export des bâtiments
+    print(f"\n💾 EXPORT DES BÂTIMENTS...")
+    
+    buildings_out = os.path.join(BASE_PATH, BUILDINGS_OUTPUT)
+    
+    if buildings_3d_data:
+        buildings_geojson = {
+            "type": "FeatureCollection",
+            "name": "Batiments_Sherbrooke_3D",
+            "crs": { 
+                "type": "name", 
+                "properties": { 
+                    "name": f"urn:ogc:def:crs:EPSG::{TARGET_CRS_EPSG}" 
+                } 
+            },
+            "features": buildings_3d_data
+        }
+        
+        with open(buildings_out, 'w', encoding='utf-8') as f:
+            json.dump(buildings_geojson, f, indent=2)
+        
+        file_size = os.path.getsize(buildings_out) / 1024
+        print(f"   ✅ {len(buildings_3d_data)} bâtiments exportés")
+        print(f"   📦 Taille: {file_size:.1f} KB")
+    else:
+        print("   ⚠️ Aucun bâtiment à exporter")
+        # Créer un exemple
+        create_example_geojson(buildings_out, study_area)
+    
+    # 9. Traitement de la végétation
+    print("\n🌳 TRAITEMENT DE LA VÉGÉTATION...")
+    
+    vegetation_out = os.path.join(BASE_PATH, VEGETATION_OUTPUT)
+    vegetation_gdf = process_vegetation_points(ndsm, dtm, mask_buildings, dsm_transform, MIN_HEIGHT_TREE)
+    
+    if not vegetation_gdf.empty:
+        vegetation_gdf.to_file(vegetation_out, driver='GPKG', layer='vegetation')
+        file_size = os.path.getsize(vegetation_out) / (1024 * 1024)
+        print(f"   ✅ {len(vegetation_gdf):,} points exportés")
+        print(f"   📦 Taille: {file_size:.1f} MB")
+    else:
+        print("   ℹ️ Aucune végétation détectée")
+    
+    # 10. Rapport final
+    print("\n" + "=" * 60)
+    print("📋 RAPPORT FINAL")
+    print("=" * 60)
+    print(f"📍 ZONE TRAITÉE:")
+    print(f"   • Points d'entrée WGS84: {len(WGS84_COORDS)} points")
+    print(f"   • Zone UTM {TARGET_CRS_EPSG}: {width:.0f}m × {height:.0f}m")
+    print(f"   • Zone WGS84 équivalente:")
+    print(f"     Longitude: {lon_min:.6f} → {lon_max:.6f}")
+    print(f"     Latitude: {lat_min:.6f} → {lat_max:.6f}")
+    print(f"   • Surface: {area:.0f} m² ({area/10000:.1f} ha)")
+    print(f"\n📊 RÉSULTATS:")
+    print(f"   • 🏢 Bâtiments 3D: {len(buildings_3d_data)}")
+    print(f"   • 🌳 Points végétation: {len(vegetation_gdf)}")
+    print(f"\n💾 FICHIERS GÉNÉRÉS:")
+    print(f"   • {BUILDINGS_OUTPUT}")
+    print(f"   • {VEGETATION_OUTPUT}")
+    print("\n🎨 Pour visualiser dans QGIS:")
+    print("   1. Chargez les deux fichiers")
+    print("   2. Activez la vue 3D (Ctrl+3)")
+    print("   3. Pour les bâtiments: Symbologie 3D → Extrusion")
+    print("   4. Hauteur: champ 'hauteur', Base: champ 'z_base'")
+    print("=" * 60)
+
+def create_example_geojson(output_path, study_area):
+    """Crée un exemple minimal"""
+    xmin, ymin, xmax, ymax = study_area
+    center_x = (xmin + xmax) / 2
+    center_y = (ymin + ymax) / 2
+    
+    example = {
+        'type': 'Feature',
+        'properties': {
+            'id': 'exemple',
+            'hauteur': 10.0,
+            'z_base': 0.0,
+            'surface': 100.0,
+            'note': 'Exemple - Aucun bâtiment OSM trouvé'
+        },
+        'geometry': {
+            'type': 'Polygon',
+            'coordinates': [[
+                [center_x - 10, center_y - 10, 0],
+                [center_x + 10, center_y - 10, 0],
+                [center_x + 10, center_y + 10, 0],
+                [center_x - 10, center_y + 10, 0],
+                [center_x - 10, center_y - 10, 0]
+            ]]
+        }
+    }
+    
+    data = {
+        "type": "FeatureCollection",
+        "name": "Exemple_Bâtiment",
+        "crs": { 
+            "type": "name", 
+            "properties": { 
+                "name": f"urn:ogc:def:crs:EPSG::{TARGET_CRS_EPSG}" 
+            } 
+        },
+        "features": [example]
+    }
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    print(f"   💡 Exemple créé: {output_path}")
+
+# ------------------------------------------------------------------------------
+# EXÉCUTION
+# ------------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("Instructions:")
+    print("1. Modifiez WGS84_COORDS dans la section CONFIGURATION (format: longitude,latitude)")
+    print("2. Ajustez BUFFER_DISTANCE si nécessaire")
+    print("3. Lancez le script")
+    print("=" * 60)
+    
+    # Vérification rapide des coordonnées
+    if WGS84_COORDS:
+        print(f"✅ Coordonnées chargées: {len(WGS84_COORDS)} points")
+        for i, (lon, lat) in enumerate(WGS84_COORDS, 1):
+            print(f"   Point {i}: {lon:.6f}, {lat:.6f}")
+    else:
+        print("❌ Aucune coordonnée définie dans WGS84_COORDS")
+        print("Veuillez ajouter des coordonnées au format: [[lon1, lat1], [lon2, lat2], ...]")
+        exit(1)
+    
+    main()
+    
+    # Générer un guide
+    guide = """🎨 GUIDE QGIS 3D
+
+1. Bâtiments (GeoJSON):
+   • Symbologie 3D → Activer
+   • Type: Extrusion simple
+   • Hauteur: champ 'hauteur'
+   • Base: champ 'z_base'
+
+2. Végétation (GeoPackage):
+   • Symbologie 3D → Activer
+   • Type: Modèle 3D simple
+   • Hauteur: champ 'hauteur'
+   • Modèle: .obj d'arbre
+
+3. Navigation:
+   • Ctrl+3 pour basculer en 3D
+   • Clic-droit pour tourner
+   • Molette pour zoomer
+
+4. Coordonnées d'origine:
+   Format utilisé: longitude,latitude (WGS84)
+   Les coordonnées ont été converties en UTM 19N (EPSG:26919) pour le traitement.
+"""
+    
+    guide_path = os.path.join(BASE_PATH, "guide_qgis.txt")
+    with open(guide_path, 'w', encoding='utf-8') as f:
+        f.write(guide)
+    print(f"\n📖 Guide généré: {guide_path}")
