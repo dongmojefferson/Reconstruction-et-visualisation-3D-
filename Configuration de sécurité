@@ -1,0 +1,66 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * 1'  # Tous les lundis à 2h
+
+jobs:
+  security:
+    name:  Security Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name:  Checkout code
+      uses: actions/checkout@v3
+    
+    - name:  Setup Python
+      uses: actions/setup-python@v4
+    
+    - name:  Bandit - Security linter
+      run: |
+        pip install bandit
+        bandit -r src/ -f json -o bandit-report.json
+    
+    - name:  Safety - Dependency check
+      run: |
+        pip install safety
+        safety check --json --output safety-report.json
+    
+    - name:  Generate security report
+      run: |
+        echo "##  Rapport de sécurité" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Date:** $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -f bandit-report.json ]; then
+          echo "### Bandit Scan" >> $GITHUB_STEP_SUMMARY
+          python -c "
+          import json
+          with open('bandit-report.json') as f:
+            data = json.load(f)
+            print(f\"Issues trouvées: {len(data.get('results', []))}\")
+          " >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -f safety-report.json ]; then
+          echo "### Safety Scan" >> $GITHUB_STEP_SUMMARY
+          python -c "
+          import json
+          with open('safety-report.json') as f:
+            data = json.load(f)
+            print(f\"Vulnérabilités: {len(data.get('vulnerabilities', []))}\")
+          " >> $GITHUB_STEP_SUMMARY
+        fi
+    
+    - name:  Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          safety-report.json
