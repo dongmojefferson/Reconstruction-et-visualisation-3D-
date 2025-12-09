@@ -3,6 +3,7 @@
 """
 GMQ710 - PROJET FINAL : Pipeline 3D avec zone personnalisable
 Solution : Bâtiments en GeoJSON + Végétation en GeoPackage (points)
+Découpage  des données (Raster & Vecteur) selon les coordonnées du campus.
 """
 
 import os
