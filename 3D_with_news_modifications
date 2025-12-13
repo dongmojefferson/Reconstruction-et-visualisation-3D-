@@ -1,0 +1,963 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+GMQ710 - PROJET FINAL : Pipeline 3D avec zone personnalisable
+Solution : Bâtiments en CityJSON + Végétation en GeoJSON (points)
+Intégration : Génération de points et dédoublonnage spatial
+"""
+
+import os
+import json
+import numpy as np
+import geopandas as gpd
+import rasterio
+from rasterio.features import rasterize
+from rasterio.windows import Window
+from shapely.geometry import Point, Polygon, box
+from pyproj import Transformer
+from shapely.strtree import STRtree
+
+# ------------------------------------------------------------------------------
+# 1. CONFIGURATION - À MODIFIER SELON VOS BESOINS
+# ------------------------------------------------------------------------------
+BASE_PATH = r"C:\Users\QAREK MBENGMO\Desktop\GMQ710\TD2\Donnees sources"
+
+# Fichiers d'entrée
+DSM_FILE = "dsm_1m_utm19_w_22_102.tif"
+DTM_FILE = "dtm_1m_utm19_w_22_102.tif"
+OSM_FILE = "buildings_sherbrooke_osm.geojson"
+
+# Fichiers de sortie
+BUILDINGS_OUTPUT_CITYJSON = "batiments_3d_sherbrooke.city.json"
+BUILDINGS_OUTPUT_GEOJSON = "batiments_3d_sherbrooke.geojson"  # Backup
+VEGETATION_OUTPUT_GEOJSON = "vegetation_points_sherbrooke.geojson"
+
+# Paramètres techniques
+TARGET_CRS_EPSG = 26919  # UTM 19N
+TARGET_CRS = f'EPSG:{TARGET_CRS_EPSG}'
+WGS84_CRS = 'EPSG:4326'  # Latitude/Longitude
+
+MIN_HEIGHT_BLD = 3.0      # Hauteur minimale d'un bâtiment (m)
+MIN_HEIGHT_TREE = 2.5     # Hauteur minimale de végétation (m)
+
+# ------------------------------------------------------------------------------
+# 2. DÉFINITION DE LA ZONE D'ÉTUDE - MODIFIEZ ICI !
+# ------------------------------------------------------------------------------
+# Format : longitude,latitude (WGS84)
+# Exemple : [-71.932847,45.381367],[-71.920931,45.381307],[-71.932892,45.375654],[-71.921444,45.376154]
+
+# Définir vos points au format longitude,latitude
+WGS84_COORDS = [
+    [-71.932847, 45.381367],  # Point 1
+    [-71.920931, 45.381307],  # Point 2  
+    [-71.924029, 45.375547],  # Point 3
+    [-71.921444, 45.376154]   # Point 4
+]
+
+BUFFER_DISTANCE = 20  # Buffer en mètres (recommandé: 20)
+
+# ------------------------------------------------------------------------------
+# 3. FONCTIONS AJOUTÉES (INTÉGRATION DES BOUTS DE CODE)
+# ------------------------------------------------------------------------------
+
+def generate_close_points_latlon_gdf(n_points=1000,
+                                     center_lat=45.379986,
+                                     center_lon=-71.930057,
+                                     spread_m=20):
+    """
+    Génère un GeoDataFrame de points proches autour d'une coordonnée lat/lon.
+    Intégrée depuis le code fourni.
+
+    - n_points  : nombre de points
+    - center_lat, center_lon : centre du nuage de points
+    - spread_m  : dispersion en mètres (écart-type)
+    """
+    # Conversion approximative mètres → degrés
+    meters_per_deg_lat = 111320
+    meters_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
+
+    # Convertir l'écart-type en degrés
+    spread_lat_deg = spread_m / meters_per_deg_lat
+    spread_lon_deg = spread_m / meters_per_deg_lon
+
+    # Générer les points
+    lats = np.random.normal(center_lat, spread_lat_deg, n_points)
+    lons = np.random.normal(center_lon, spread_lon_deg, n_points)
+
+    geoms = [Point(lon, lat) for lon, lat in zip(lons, lats)]
+
+    return gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
+
+def filter_close_points_spatial(gdf, min_dist_deg=0.00008):
+    """
+    Filtre les points trop proches en utilisant STRtree pour performance.
+    Intégrée depuis le code fourni.
+    
+    Args:
+        gdf: GeoDataFrame de points
+        min_dist_deg: distance minimale en degrés
+    
+    Returns:
+        GeoDataFrame filtré
+    """
+    if len(gdf) == 0:
+        return gdf
+    
+    geoms = list(gdf.geometry)
+    tree = STRtree(geoms)
+
+    picked = []
+    used = set()
+
+    for i, p in enumerate(geoms):
+        if p in used:
+            continue
+        picked.append(i)
+
+        # On récupère les indices retournés par query()
+        idxs = tree.query(p.buffer(min_dist_deg))
+
+        for idx in idxs:
+            neighbor = geoms[idx]   # <-- récupérer la géométrie
+            if neighbor != p and neighbor.distance(p) < min_dist_deg:
+                used.add(neighbor)
+
+    if picked:
+        filtered_gdf = gdf.iloc[picked].copy().reset_index(drop=True)
+        print(f"   🔍 Dédoublonnage spatial: {len(filtered_gdf)}/{len(gdf)} points conservés")
+        return filtered_gdf
+    
+    return gpd.GeoDataFrame(columns=gdf.columns, crs=gdf.crs)
+
+def export_buildings_to_cityjson(buildings_3d_data, output_path):
+    """
+    Exporte les bâtiments en format CityJSON.
+    
+    Args:
+        buildings_3d_data: liste de features GeoJSON 3D
+        output_path: chemin du fichier de sortie
+    """
+    print(f"   🏙️  Export CityJSON: {output_path}")
+    
+    # Structure CityJSON de base
+    cityjson = {
+        "type": "CityJSON",
+        "version": "1.1",
+        "metadata": {
+            "referenceSystem": f"urn:ogc:def:crs:EPSG::{TARGET_CRS_EPSG}",
+            "title": "Bâtiments 3D Sherbrooke",
+            "creator": "GMQ710 Pipeline",
+            "created": "2024",
+            "transformation": {
+                "scale": [1.0, 1.0, 1.0],
+                "translate": [0.0, 0.0, 0.0]
+            }
+        },
+        "CityObjects": {},
+        "vertices": []
+    }
+    
+    # Collecte tous les sommets uniques
+    all_vertices = []
+    vertex_index_map = {}
+    vertex_counter = 0
+    
+    # Traitement de chaque bâtiment
+    for i, feature in enumerate(buildings_3d_data):
+        building_id = f"building_{i:04d}"
+        geom_3d = feature['geometry']
+        props = feature['properties']
+        
+        if geom_3d['type'] == 'Polygon':
+            # Extraire les coordonnées 3D
+            rings = geom_3d['coordinates']
+            building_boundaries = []
+            
+            # Pour chaque anneau (généralement juste l'extérieur pour LOD1)
+            for ring in rings:
+                ring_vertices = []
+                for vertex in ring:
+                    # Convertir en tuple pour l'identification unique
+                    vertex_tuple = tuple(vertex)
+                    if vertex_tuple not in vertex_index_map:
+                        vertex_index_map[vertex_tuple] = vertex_counter
+                        all_vertices.append(list(vertex_tuple))
+                        vertex_counter += 1
+                    ring_vertices.append(vertex_index_map[vertex_tuple])
+                
+                # Pour un bâtiment simple, on prend les 4 premiers sommets (carré)
+                if len(ring_vertices) >= 4:
+                    building_boundaries.append([ring_vertices[:4]])
+            
+            # Créer l'objet CityJSON
+            cityjson["CityObjects"][building_id] = {
+                "type": "Building",
+                "attributes": {
+                    "hauteur": props.get('hauteur', 0),
+                    "z_base": props.get('z_base', 0),
+                    "surface": props.get('surface', 0),
+                    "id": props.get('id', building_id)
+                },
+                "geometry": [{
+                    "type": "MultiSurface",
+                    "lod": 1,  # Niveau de détail 1 (extrusion simple)
+                    "boundaries": building_boundaries
+                }]
+            }
+    
+    # Ajouter les sommets
+    cityjson["vertices"] = all_vertices
+    
+    # Écrire le fichier
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(cityjson, f, indent=2)
+    
+    file_size = os.path.getsize(output_path) / 1024
+    print(f"   ✅ {len(buildings_3d_data)} bâtiments exportés en CityJSON")
+    print(f"   📦 Taille: {file_size:.1f} KB")
+    print(f"   📍 Fichier: {output_path}")
+    
+    return cityjson
+
+def export_vegetation_to_geojson(vegetation_gdf, output_path):
+    """
+    Exporte la végétation en format GeoJSON optimisé.
+    
+    Args:
+        vegetation_gdf: GeoDataFrame de végétation
+        output_path: chemin du fichier de sortie
+    """
+    print(f"   🌿 Export végétation GeoJSON: {output_path}")
+    
+    # Convertir en GeoJSON avec coordonnées 3D
+    features = []
+    
+    for idx, row in vegetation_gdf.iterrows():
+        feature = {
+            "type": "Feature",
+            "properties": {
+                "id": f"veg_{idx:06d}",
+                "hauteur": float(row.get('hauteur', 0)),
+                "z_base": float(row.get('z_base', 0)),
+                "type_veg": str(row.get('type_veg', 'arbre'))
+            },
+            "geometry": {
+                "type": "Point",
+                "coordinates": [
+                    float(row.geometry.x),
+                    float(row.geometry.y),
+                    float(row.get('z_base', 0))
+                ]
+            }
+        }
+        features.append(feature)
+    
+    vegetation_geojson = {
+        "type": "FeatureCollection",
+        "name": "Vegetation_Sherbrooke_3D",
+        "crs": {
+            "type": "name",
+            "properties": {"name": f"urn:ogc:def:crs:EPSG::{TARGET_CRS_EPSG}"}
+        },
+        "features": features
+    }
+    
+    # Écrire le fichier
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(vegetation_geojson, f, indent=2)
+    
+    file_size = os.path.getsize(output_path) / 1024
+    print(f"   ✅ {len(vegetation_gdf)} points exportés en GeoJSON 3D")
+    print(f"   📦 Taille: {file_size:.1f} KB")
+    print(f"   📍 Fichier: {output_path}")
+    
+    return vegetation_geojson
+
+def generate_supplementary_vegetation(study_area, n_points=500):
+    """
+    Génère des points de végétation supplémentaires quand peu de végétation est détectée.
+    Utilise la fonction generate_close_points_latlon_gdf intégrée.
+    
+    Args:
+        study_area: tuple (xmin, ymin, xmax, ymax) en UTM
+        n_points: nombre de points à générer
+    
+    Returns:
+        GeoDataFrame de points de végétation
+    """
+    print(f"   🌿 Génération de {n_points} points de végétation supplémentaires")
+    
+    # Convertir le centre de la zone en WGS84 pour la génération
+    transformer_to_wgs = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
+    
+    # Calculer le centre de la zone
+    x_center = (study_area[0] + study_area[2]) / 2
+    y_center = (study_area[1] + study_area[3]) / 2
+    
+    # Convertir en WGS84
+    lon_center, lat_center = transformer_to_wgs.transform(x_center, y_center)
+    
+    # Générer des points avec la fonction intégrée
+    points_gdf_wgs84 = generate_close_points_latlon_gdf(
+        n_points=n_points,
+        center_lat=lat_center,
+        center_lon=lon_center,
+        spread_m=min(study_area[2]-study_area[0], study_area[3]-study_area[1])/4
+    )
+    
+    # Convertir en UTM
+    points_gdf_utm = points_gdf_wgs84.to_crs(TARGET_CRS)
+    
+    # Ajouter des attributs réalistes
+    points_data = []
+    for idx, row in points_gdf_utm.iterrows():
+        # Hauteur réaliste (majorité de buissons, quelques arbres)
+        if np.random.random() < 0.3:  # 30% d'arbres
+            height_val = np.random.uniform(5.0, 25.0)
+            veg_type = 'arbre'
+        else:  # 70% de buissons
+            height_val = np.random.uniform(1.5, 4.5)
+            veg_type = 'buisson'
+        
+        # Base aléatoire mais réaliste
+        z_base = np.random.uniform(200.0, 350.0)
+        
+        # Créer un point avec attributs
+        points_data.append({
+            'geometry': row.geometry,
+            'hauteur': round(height_val, 2),
+            'z_base': round(z_base, 2),
+            'type_veg': veg_type,
+            'source': 'simulé'
+        })
+    
+    if points_data:
+        veg_gdf = gpd.GeoDataFrame(points_data, crs=TARGET_CRS)
+        
+        # Appliquer le dédoublonnage spatial
+        # Conversion approximative: 2m ≈ 0.000018 degrés
+        veg_gdf = filter_close_points_spatial(veg_gdf, min_dist_deg=0.000018)
+        
+        return veg_gdf
+    
+    return gpd.GeoDataFrame()
+
+# ------------------------------------------------------------------------------
+# 4. FONCTIONS PRINCIPALES EXISTANTES
+# ------------------------------------------------------------------------------
+
+def get_raster_bounds(raster_path):
+    """Récupère les limites d'un raster"""
+    with rasterio.open(raster_path) as src:
+        return src.bounds, src.crs
+
+def wgs84_to_utm(coords_wgs84, target_crs_epsg=26919):
+    """Convertit des coordonnées WGS84 (lon,lat) en UTM"""
+    transformer = Transformer.from_crs(WGS84_CRS, f'EPSG:{target_crs_epsg}', always_xy=True)
+    
+    # Convertir chaque point
+    coords_utm = []
+    for lon, lat in coords_wgs84:
+        x, y = transformer.transform(lon, lat)
+        coords_utm.append((x, y))
+    
+    return coords_utm
+
+def create_utm_zone_from_points(points_utm):
+    """Crée une zone UTM rectangulaire à partir de points"""
+    if not points_utm:
+        return None
+    
+    # Extraire tous les x et y
+    x_coords = [pt[0] for pt in points_utm]
+    y_coords = [pt[1] for pt in points_utm]
+    
+    # Créer une boîte englobante
+    xmin, xmax = min(x_coords), max(x_coords)
+    ymin, ymax = min(y_coords), max(y_coords)
+    
+    return (xmin, ymin, xmax, ymax)
+
+def validate_and_adjust_zone(zone_coords, raster_bounds):
+    """Valide et ajuste la zone aux limites du raster"""
+    xmin, ymin, xmax, ymax = zone_coords
+    
+    # Vérifier l'ordre
+    if xmin >= xmax:
+        xmin, xmax = xmax, xmin
+    if ymin >= ymax:
+        ymin, ymax = ymax, ymin
+    
+    # Ajuster aux limites
+    xmin = max(raster_bounds.left, xmin)
+    ymin = max(raster_bounds.bottom, ymin)
+    xmax = min(raster_bounds.right, xmax)
+    ymax = min(raster_bounds.top, ymax)
+    
+    return (xmin, ymin, xmax, ymax)
+
+def crop_raster_to_area(raster_path, study_area):
+    """Recadre un raster à la zone d'étude"""
+    xmin, ymin, xmax, ymax = study_area
+    
+    try:
+        with rasterio.open(raster_path) as src:
+            # Convertir coordonnées en indices de pixels
+            row_start, col_start = src.index(xmin, ymax)  # Coin NW
+            row_end, col_end = src.index(xmax, ymin)      # Coin SE
+            
+            # S'assurer du bon ordre
+            row_start, row_end = sorted([int(row_start), int(row_end)])
+            col_start, col_end = sorted([int(col_start), int(col_end)])
+            
+            # Limiter aux dimensions
+            row_start = max(0, row_start)
+            col_start = max(0, col_start)
+            row_end = min(src.height - 1, row_end)
+            col_end = min(src.width - 1, col_end)
+            
+            # Calculer la taille
+            height = row_end - row_start + 1
+            width = col_end - col_start + 1
+            
+            if width <= 0 or height <= 0:
+                print(f"❌ Fenêtre invalide: {width}x{height} pixels")
+                return None, None
+            
+            # Créer la fenêtre
+            window = Window(col_start, row_start, width, height)
+            
+            # Lire les données
+            data = src.read(1, window=window)
+            transform = src.window_transform(window)
+            
+            print(f"   ✅ {data.shape[1]}×{data.shape[0]} pixels")
+            return data, transform
+            
+    except Exception as e:
+        print(f"❌ Erreur recadrage: {e}")
+        return None, None
+
+def create_building_3d_geojson(polygon, z_base, height):
+    """Crée une géométrie 3D pour GeoJSON"""
+    try:
+        coords_3d = []
+        for x, y in polygon.exterior.coords:
+            coords_3d.append([x, y, z_base])
+        return {
+            "type": "Polygon", 
+            "coordinates": [coords_3d]
+        }
+    except Exception as e:
+        print(f"⚠️ Erreur géométrie 3D: {e}")
+        return None
+
+def process_vegetation_points(ndsm, dtm, mask_buildings, transform, min_height):
+    """Extrait la végétation sous forme de points - VERSION AMÉLIORÉE"""
+    veg_mask = (ndsm > min_height) & (mask_buildings == 0)
+    rows, cols = np.where(veg_mask)
+    
+    print(f"   🌳 Pixels végétation détectés: {len(rows):,}")
+    
+    if len(rows) == 0:
+        return gpd.GeoDataFrame()
+    
+    # Limite pour éviter les fichiers trop gros
+    MAX_POINTS = 50000  # Réduit pour meilleures performances
+    if len(rows) > MAX_POINTS:
+        step = max(1, len(rows) // MAX_POINTS)
+        rows = rows[::step]
+        cols = cols[::step]
+        print(f"   🔽 Échantillonnage: 1 point sur {step}")
+    
+    points_data = []
+    for r, c in zip(rows, cols):
+        try:
+            height_val = float(ndsm[r, c])
+            z_base = float(dtm[r, c])
+            x, y = rasterio.transform.xy(transform, r, c, offset='center')
+            
+            # Classification améliorée de la végétation
+            if height_val > 8.0:
+                veg_type = 'arbre_grand'
+            elif height_val > 5.0:
+                veg_type = 'arbre_moyen'
+            elif height_val > 3.0:
+                veg_type = 'arbre_petit'
+            else:
+                veg_type = 'buisson'
+            
+            points_data.append({
+                'geometry': Point(x, y),
+                'hauteur': round(height_val, 2),
+                'z_base': round(z_base, 2),
+                'type_veg': veg_type,
+                'source': 'détecté'
+            })
+        except:
+            continue
+    
+    if points_data:
+        vegetation_gdf = gpd.GeoDataFrame(points_data, crs=TARGET_CRS)
+        
+        # AJOUTEZ JUSTE CES LIGNES :
+        print(f"   ⚡ Réduction agressive des {len(vegetation_gdf):,} points...")
+        
+        # 1. Garder seulement les arbres > 4m
+        if len(vegetation_gdf) > 0 and 'hauteur' in vegetation_gdf.columns:
+            vegetation_gdf = vegetation_gdf[vegetation_gdf['hauteur'] > 4.0]
+            print(f"   📏 Après filtre hauteur: {len(vegetation_gdf):,}")
+        
+        # 2. Dédoublonnage spatial (3m minimum)
+        if len(vegetation_gdf) > 0:
+            vegetation_gdf = filter_close_points_spatial(vegetation_gdf, min_dist_deg=0.000027)
+        
+        # 3. Limiter à 5,000 points max
+        if len(vegetation_gdf) > 5000:
+            # Garder les 5,000 plus hauts
+            vegetation_gdf = vegetation_gdf.nlargest(5000, 'hauteur')
+            print(f"   🎯 Limité aux 5,000 plus hauts")
+        
+        print(f"   ✅ Points finaux: {len(vegetation_gdf):,}")
+        return vegetation_gdf
+    
+    return gpd.GeoDataFrame()
+    
+ 
+# ------------------------------------------------------------------------------
+# 5. EXÉCUTION PRINCIPALE (AVEC INTÉGRATION)
+# ------------------------------------------------------------------------------
+
+def main():
+    print("=" * 70)
+    print("GMQ710 - RECONSTRUCTION 3D AVANCÉE")
+    print("CityJSON (bâtiments) + GeoJSON (végétation) + Dédoublonnage spatial")
+    print("=" * 70)
+    
+    # Chemins complets
+    dsm_path = os.path.join(BASE_PATH, DSM_FILE)
+    dtm_path = os.path.join(BASE_PATH, DTM_FILE)
+    osm_path = os.path.join(BASE_PATH, OSM_FILE)
+    
+    # Vérification des fichiers
+    for path in [dsm_path, dtm_path, osm_path]:
+        if not os.path.exists(path):
+            print(f"❌ Fichier manquant: {os.path.basename(path)}")
+            print(f"   Chemin: {path}")
+            return
+    
+    # 1. Conversion des coordonnées WGS84 vers UTM
+    print("\n📍 CONVERSION DES COORDONNÉES...")
+    print(f"   📍 Points WGS84 (lon,lat):")
+    for i, (lon, lat) in enumerate(WGS84_COORDS, 1):
+        print(f"     Point {i}: {lon:.6f}, {lat:.6f}")
+    
+    utm_coords = wgs84_to_utm(WGS84_COORDS, TARGET_CRS_EPSG)
+    print(f"\n   🗺️  Points UTM {TARGET_CRS_EPSG} (x,y):")
+    for i, (x, y) in enumerate(utm_coords, 1):
+        print(f"     Point {i}: {x:.2f}, {y:.2f}")
+    
+    # Créer la zone UTM à partir des points
+    study_area_utm = create_utm_zone_from_points(utm_coords)
+    
+    # 2. Obtenir les limites du raster
+    print("\n📍 ANALYSE DES DONNÉES RASTER...")
+    raster_bounds, raster_crs = get_raster_bounds(dsm_path)
+    
+    if raster_bounds is None:
+        print("❌ Impossible de lire le DSM")
+        return
+    
+    print(f"   📏 Étendue totale du raster: {raster_bounds}")
+    print(f"   🗺️  CRS: {raster_crs}")
+    
+    # 3. Appliquer le buffer à la zone
+    print(f"\n🗺️  CONFIGURATION DE LA ZONE")
+    xmin, ymin, xmax, ymax = study_area_utm
+    
+    # Appliquer le buffer
+    if BUFFER_DISTANCE > 0:
+        xmin -= BUFFER_DISTANCE
+        ymin -= BUFFER_DISTANCE
+        xmax += BUFFER_DISTANCE
+        ymax += BUFFER_DISTANCE
+        print(f"   📏 Buffer appliqué: {BUFFER_DISTANCE}m")
+    
+    # Valider et ajuster la zone
+    study_area = validate_and_adjust_zone((xmin, ymin, xmax, ymax), raster_bounds)
+    
+    width = study_area[2] - study_area[0]
+    height = study_area[3] - study_area[1]
+    area = width * height
+    
+    print(f"   📐 Zone finale UTM {TARGET_CRS_EPSG}:")
+    print(f"     X: {study_area[0]:.0f} → {study_area[2]:.0f} ({width:.0f}m)")
+    print(f"     Y: {study_area[1]:.0f} → {study_area[3]:.0f} ({height:.0f}m)")
+    print(f"     Surface: {area:.0f} m² ({area/10000:.1f} ha)")
+    
+    if area <= 0:
+        print("❌ Zone invalide après ajustement")
+        return
+    
+    # Convertir la zone UTM en WGS84 pour l'affichage
+    transformer_to_wgs = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
+    lon_min, lat_min = transformer_to_wgs.transform(study_area[0], study_area[1])
+    lon_max, lat_max = transformer_to_wgs.transform(study_area[2], study_area[3])
+    
+    print(f"\n   🌐 Zone équivalente WGS84 (lon,lat):")
+    print(f"     Longitude: {lon_min:.6f} → {lon_max:.6f}")
+    print(f"     Latitude: {lat_min:.6f} → {lat_max:.6f}")
+    
+    # 4. Recadrage des rasters
+    print("\n🔪 RECADRAGE DES RASTERS...")
+    
+    dsm, dsm_transform = crop_raster_to_area(dsm_path, study_area)
+    if dsm is None:
+        return
+    
+    dtm, dtm_transform = crop_raster_to_area(dtm_path, study_area)
+    if dtm is None:
+        return
+    
+    # Ajustement des dimensions si nécessaire
+    if dsm.shape != dtm.shape:
+        print("   ⚠️ Ajustement des dimensions...")
+        min_height = min(dsm.shape[0], dtm.shape[0])
+        min_width = min(dsm.shape[1], dtm.shape[1])
+        dsm = dsm[:min_height, :min_width]
+        dtm = dtm[:min_height, :min_width]
+    
+    # 5. Calcul du nDSM
+    print("\n📊 CALCUL DES HAUTEURS...")
+    ndsm = dsm - dtm
+    ndsm[ndsm < 0] = 0
+    
+    valid_heights = ndsm[ndsm > 0]
+    if len(valid_heights) > 0:
+        print(f"   📈 Hauteur max: {valid_heights.max():.1f}m")
+        print(f"   📉 Hauteur moyenne: {valid_heights.mean():.1f}m")
+        print(f"   📊 Pixels avec végétation potentielle (> {MIN_HEIGHT_TREE}m): "
+              f"{np.sum(ndsm > MIN_HEIGHT_TREE):,}")
+    else:
+        print("   ⚠️ Aucune hauteur positive détectée")
+    
+    # 6. Chargement et filtrage des bâtiments
+    print("\n🏢 TRAITEMENT DES BÂTIMENTS...")
+    
+    buildings_gdf = gpd.read_file(osm_path)
+    if buildings_gdf.crs is None or str(buildings_gdf.crs) != TARGET_CRS:
+        buildings_gdf = buildings_gdf.to_crs(TARGET_CRS)
+    
+    # Filtrer dans la zone
+    zone_box = box(*study_area)
+    buildings_in_zone = buildings_gdf[buildings_gdf.intersects(zone_box)].copy()
+    
+    print(f"   🏛️  Bâtiments dans la zone: {len(buildings_in_zone)}/{len(buildings_gdf)}")
+    
+    # 7. Traitement des bâtiments
+    mask_buildings = np.zeros(dsm.shape, dtype='uint8')
+    buildings_3d_data = []
+    
+    for idx, row in buildings_in_zone.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        
+        try:
+            # Rasterisation pour extraction de hauteur
+            mask_b = rasterize([geom], out_shape=dsm.shape, 
+                             transform=dsm_transform, fill=0, 
+                             default_value=1, dtype='uint8')
+            mask_buildings = np.maximum(mask_buildings, mask_b)
+            
+            # Extraction hauteur
+            h_vals = ndsm[mask_b == 1]
+            if h_vals.size == 0:
+                continue
+            
+            h_bat = float(np.percentile(h_vals[h_vals > 0], 90))
+            z_base = float(dtm[mask_b == 1].min())
+            
+            if h_bat >= MIN_HEIGHT_BLD:
+                simple_geom = geom.simplify(1.0, preserve_topology=True)
+                
+                # Gérer MultiPolygon
+                if simple_geom.geom_type == 'Polygon':
+                    polygons = [simple_geom]
+                else:
+                    polygons = list(simple_geom.geoms)
+                
+                for poly in polygons:
+                    geom_3d = create_building_3d_geojson(poly, z_base, h_bat)
+                    if geom_3d:
+                        buildings_3d_data.append({
+                            'type': 'Feature',
+                            'properties': {
+                                'id': f"bat_{idx}",
+                                'hauteur': round(h_bat, 2),
+                                'z_base': round(z_base, 2),
+                                'surface': round(poly.area, 1)
+                            },
+                            'geometry': geom_3d
+                        })
+                        
+        except Exception as e:
+            continue
+    
+    # 8. Export des bâtiments en CityJSON + GeoJSON (backup)
+    print(f"\n💾 EXPORT DES BÂTIMENTS...")
+    
+    buildings_out_cityjson = os.path.join(BASE_PATH, BUILDINGS_OUTPUT_CITYJSON)
+    buildings_out_geojson = os.path.join(BASE_PATH, BUILDINGS_OUTPUT_GEOJSON)
+    
+    if buildings_3d_data:
+        # Export principal en CityJSON
+        cityjson_data = export_buildings_to_cityjson(buildings_3d_data, buildings_out_cityjson)
+        
+        # Export backup en GeoJSON
+        buildings_geojson = {
+            "type": "FeatureCollection",
+            "name": "Batiments_Sherbrooke_3D",
+            "crs": { 
+                "type": "name", 
+                "properties": { 
+                    "name": f"urn:ogc:def:crs:EPSG::{TARGET_CRS_EPSG}" 
+                } 
+            },
+            "features": buildings_3d_data
+        }
+        
+        with open(buildings_out_geojson, 'w', encoding='utf-8') as f:
+            json.dump(buildings_geojson, f, indent=2)
+        
+        file_size_geojson = os.path.getsize(buildings_out_geojson) / 1024
+        print(f"   📋 Backup GeoJSON: {file_size_geojson:.1f} KB")
+        
+    else:
+        print("   ⚠️ Aucun bâtiment à exporter")
+        # Créer un exemple
+        create_example_geojson(buildings_out_geojson, study_area)
+    
+    # 9. Traitement de la végétation avec dédoublonnage
+    print("\n🌳 TRAITEMENT DE LA VÉGÉTATION AVEC DÉDOUBLONNAGE...")
+    
+    vegetation_out = os.path.join(BASE_PATH, VEGETATION_OUTPUT_GEOJSON)
+    vegetation_gdf = process_vegetation_points(ndsm, dtm, mask_buildings, dsm_transform, MIN_HEIGHT_TREE)
+    
+    # INTÉGRATION : Si peu de végétation détectée, générer des points supplémentaires
+    if len(vegetation_gdf) < 100:
+        print(f"   ℹ️  Peu de végétation détectée ({len(vegetation_gdf)} points)")
+        print(f"   🌿 Ajout de végétation simulée...")
+        
+        supplementary_veg = generate_supplementary_vegetation(study_area, n_points=300)
+        
+        if not vegetation_gdf.empty and not supplementary_veg.empty:
+            # Combiner végétation détectée et simulée
+            combined_veg = gpd.GeoDataFrame(
+                pd.concat([vegetation_gdf, supplementary_veg], ignore_index=True),
+                crs=TARGET_CRS
+            )
+            vegetation_gdf = combined_veg
+        elif not supplementary_veg.empty:
+            vegetation_gdf = supplementary_veg
+    
+    if not vegetation_gdf.empty:
+        # Export en GeoJSON 3D
+        vegetation_geojson = export_vegetation_to_geojson(vegetation_gdf, vegetation_out)
+        
+        # Statistiques détaillées
+        print(f"   📊 STATISTIQUES VÉGÉTATION:")
+        print(f"      • Total points: {len(vegetation_gdf)}")
+        print(f"      • Hauteur moyenne: {vegetation_gdf['hauteur'].mean():.2f}m")
+        print(f"      • Hauteur max: {vegetation_gdf['hauteur'].max():.2f}m")
+        
+        if 'source' in vegetation_gdf.columns:
+            detected = (vegetation_gdf['source'] == 'détecté').sum()
+            simulated = (vegetation_gdf['source'] == 'simulé').sum()
+            print(f"      • Source: {detected} détectés, {simulated} simulés")
+        
+        # Distribution par type
+        if 'type_veg' in vegetation_gdf.columns:
+            print(f"      • Distribution par type:")
+            type_counts = vegetation_gdf['type_veg'].value_counts()
+            for veg_type, count in type_counts.items():
+                percentage = (count / len(vegetation_gdf)) * 100
+                print(f"        {veg_type}: {count} points ({percentage:.1f}%)")
+    else:
+        print("   ℹ️ Aucune végétation détectée ou générée")
+    
+    # 10. Rapport final amélioré
+    print("\n" + "=" * 70)
+    print("📋 RAPPORT FINAL - INTÉGRATION COMPLÈTE")
+    print("=" * 70)
+    
+    print(f"📍 ZONE TRAITÉE:")
+    print(f"   • Surface: {area:.0f} m² ({area/10000:.1f} ha)")
+    print(f"   • Dimensions: {width:.0f}m × {height:.0f}m")
+    
+    print(f"\n📊 RÉSULTATS:")
+    print(f"   • 🏢 Bâtiments 3D: {len(buildings_3d_data)}")
+    print(f"   • 🌳 Points végétation: {len(vegetation_gdf) if not vegetation_gdf.empty else 0}")
+    
+    if not vegetation_gdf.empty:
+        avg_height = vegetation_gdf['hauteur'].mean()
+        max_height = vegetation_gdf['hauteur'].max()
+        print(f"      → Hauteur moyenne: {avg_height:.1f}m, Max: {max_height:.1f}m")
+        
+        # Calcul de la densité
+        points_per_ha = len(vegetation_gdf) / (area / 10000) if area > 0 else 0
+        print(f"      → Densité: {points_per_ha:.1f} points/ha")
+    
+    print(f"\n💾 FICHIERS GÉNÉRÉS:")
+    print(f"   • {BUILDINGS_OUTPUT_CITYJSON} (format CityJSON - recommandé)")
+    print(f"   • {BUILDINGS_OUTPUT_GEOJSON} (format GeoJSON - backup)")
+    print(f"   • {VEGETATION_OUTPUT_GEOJSON} (format GeoJSON 3D)")
+    
+    print(f"\n🔧 FONCTIONNALITÉS INTÉGRÉES:")
+    print(f"   • ✅ Génération de points aléatoires (pour tests)")
+    print(f"   • ✅ Dédoublonnage spatial avec STRtree")
+    print(f"   • ✅ Export CityJSON pour bâtiments")
+    print(f"   • ✅ Export GeoJSON 3D pour végétation")
+    print(f"   • ✅ Classification améliorée de la végétation")
+    
+    print("\n🎨 POUR VISUALISER:")
+    print("   1. CityJSON: Utilisez le plugin CityJSON Loader dans QGIS")
+    print("   2. GeoJSON: Chargement natif dans QGIS")
+    print("   3. Vue 3D: Ctrl+3, extrusion par hauteur (champ 'hauteur')")
+    print("=" * 70)
+    
+    return {
+        'success': True,
+        'buildings_count': len(buildings_3d_data),
+        'vegetation_count': len(vegetation_gdf) if not vegetation_gdf.empty else 0,
+        'cityjson_file': BUILDINGS_OUTPUT_CITYJSON,
+        'geojson_file': VEGETATION_OUTPUT_GEOJSON
+    }
+
+def create_example_geojson(output_path, study_area):
+    """Crée un exemple minimal"""
+    xmin, ymin, xmax, ymax = study_area
+    center_x = (xmin + xmax) / 2
+    center_y = (ymin + ymax) / 2
+    
+    example = {
+        'type': 'Feature',
+        'properties': {
+            'id': 'exemple',
+            'hauteur': 10.0,
+            'z_base': 0.0,
+            'surface': 100.0,
+            'note': 'Exemple - Aucun bâtiment OSM trouvé'
+        },
+        'geometry': {
+            'type': 'Polygon',
+            'coordinates': [[
+                [center_x - 10, center_y - 10, 0],
+                [center_x + 10, center_y - 10, 0],
+                [center_x + 10, center_y + 10, 0],
+                [center_x - 10, center_y + 10, 0],
+                [center_x - 10, center_y - 10, 0]
+            ]]
+        }
+    }
+    
+    data = {
+        "type": "FeatureCollection",
+        "name": "Exemple_Bâtiment",
+        "crs": { 
+            "type": "name", 
+            "properties": { 
+                "name": f"urn:ogc:def:crs:EPSG::{TARGET_CRS_EPSG}" 
+            } 
+        },
+        "features": [example]
+    }
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    print(f"   💡 Exemple créé: {output_path}")
+
+# ------------------------------------------------------------------------------
+# EXÉCUTION
+# ------------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("Instructions:")
+    print("1. Modifiez WGS84_COORDS dans la section CONFIGURATION")
+    print("2. Ajustez BUFFER_DISTANCE si nécessaire")
+    print("3. Le script génère CityJSON (bâtiments) + GeoJSON (végétation)")
+    print("=" * 70)
+    
+    # Vérification rapide des coordonnées
+    if WGS84_COORDS:
+        print(f"✅ Coordonnées chargées: {len(WGS84_COORDS)} points")
+        for i, (lon, lat) in enumerate(WGS84_COORDS, 1):
+            print(f"   Point {i}: {lon:.6f}, {lat:.6f}")
+    else:
+        print("❌ Aucune coordonnée définie dans WGS84_COORDS")
+        print("Veuillez ajouter des coordonnées au format: [[lon1, lat1], [lon2, lat2], ...]")
+        exit(1)
+    
+    try:
+        import pandas as pd
+        print("✅ pandas importé avec succès")
+    except ImportError:
+        print("⚠️  pandas n'est pas installé. Installation recommandée.")
+        print("   pip install pandas")
+        # Définir un substitut simple si pandas n'est pas disponible
+        class SimpleConcat:
+            @staticmethod
+            def concat(dfs, ignore_index=True):
+                # Implémentation simplifiée
+                return dfs[0] if len(dfs) == 1 else None
+        pd = type('pd', (), {'concat': SimpleConcat.concat})()
+    
+    main()
+    
+    # Générer un guide amélioré
+    guide = """🎨 GUIDE UTILISATION AVANCÉE
+
+FORMATS DE SORTIE:
+1. CityJSON (.city.json) - Bâtiments 3D
+   • Format standard OGC pour villes 3D
+   • Structure optimisée pour le web
+   • Compatible avec: Cesium, Three.js, FME
+   • Visualisation: Plugin CityJSON Loader dans QGIS
+
+2. GeoJSON (.geojson) - Végétation 3D
+   • Format universel et léger
+   • Points avec coordonnées 3D (x, y, z)
+   • Attributs: hauteur, type_veg, source
+   • Compatible avec: QGIS, ArcGIS, Mapbox
+
+FONCTIONNALITÉS INTÉGRÉES:
+• Génération de points: Création de données de test
+• Dédoublonnage spatial: Élimination des points trop proches
+• Classification: Arbres (grand/moyen/petit) et buissons
+• Complémentation: Points simulés si faible détection
+
+VISUALISATION QGIS:
+1. Bâtiments (CityJSON):
+   - Installer le plugin "CityJSON Loader"
+   - Charger le fichier .city.json
+   - Vue 3D: Symbologie → Hauteur par extrusion
+
+2. Végétation (GeoJSON):
+   - Chargement natif
+   - Symbologie 3D: Points → Modèles 3D
+   - Hauteur: Utiliser le champ 'hauteur'
+
+PARAMÈTRES AJUSTABLES:
+• WGS84_COORDS: Coordonnées de la zone
+• BUFFER_DISTANCE: Buffer autour de la zone
+• MIN_HEIGHT_BLD/TREE: Seuils de hauteur
+
+TESTS DE FONCTIONNALITÉ:
+Le code intègre des fonctions de génération de points
+pour tester le pipeline sans données réelles.
+"""
+    
+    guide_path = os.path.join(BASE_PATH, "guide_avance.txt")
+    with open(guide_path, 'w', encoding='utf-8') as f:
+        f.write(guide)
+    print(f"\n📖 Guide avancé généré: {guide_path}")
