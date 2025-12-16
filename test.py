@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GMQ710 - PROJET FINAL : CAMPUS UDE (Version Finale)
-Objectifs :
-1. Découpage précis sur la zone du Campus (Coordonnées fournies).
-2. Export Bâtiments -> CityJSON (bâtis_campus_Uds.city.json).
-3. Export Végétation -> GeoJSON (végétation_campus_Uds.geojson) avec :
-   - Dédoublonnage spatial pour éviter le crash QGIS.
-   - Forçage du CRS EPSG:26919 pour le bon géopositionnement.
+GMQ710 - PROJET FINAL : CAMPUS UDS (Version Finale)
+
 """
 
 import os
