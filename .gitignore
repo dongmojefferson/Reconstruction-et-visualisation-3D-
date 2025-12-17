@@ -6,9 +6,30 @@
 *.gpkg
 *.city.json
 *.json
+*.aux.xml
+*.rar
+*.zip
+*.obj
+*.mtl
+*.png
+*.jpg
+*/Modèle obj/
+*.ma
 
 # Ignorer les fichiers systèmes et python
 __pycache__/
 *.pyc
 .DS_Store
 .vscode/
+
+
+# Fichiers temporaires et de logiciel
+~$*
+*.qgz
+*.log
+*.csv
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.qmd

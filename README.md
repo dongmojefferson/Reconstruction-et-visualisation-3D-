@@ -4,7 +4,11 @@ Ce projet vise à développer un pipeline de traitement géospatial entièrement
 
 L'objectif principal est de fusionner des données hétérogènes (vecteurs 2D et rasters d'élévation) pour générer une scène 3D sémantique standardisée. Le script doit :
 
+<<<<<<< HEAD
+* Calculer précisément la hauteur des bâtiments (LoD1) par analyse zonale.
+=======
 * Calculer précisément la hauteur des bâtiments par analyse zonale.
+>>>>>>> e0945b362252caa5ad4d17e7db614d9a9759be03
 
 * Reconstituer la végétation dense (forêt) et les arbres isolés.
 
@@ -29,6 +33,13 @@ L'objectif principal est de fusionner des données hétérogènes (vecteurs 2D e
    - Numpy (Calculs matriciels rapides)
    - Json (Génération standardisée du fichier de sortie Cityjson)
 ## Répartition des tâches dans l’équipe
+<<<<<<< HEAD
+Jefferson Dongmo Somtsi : Développement de la structure CityJSON et validation de la visualisation 3D.
+
+Qarek Mbengmo Donfack :  Développement de la logique d'analyse.
+## Questions à résoudre
+Question #1 (Optimisation Rendu) : Le format CityJSON génère une géométrie explicite pour chaque arbre, ce qui rend le fichier lourd (> 20 millions d'arbres sur notre zone d'étude) et Qgis plante lors de l'affichage. Peut-on enrgistrer les bâtis en geojson et la végétation exporter en points au format GeoPackage puis les afficher avec la symbologie de modèle 3D de QGIS ?
+=======
 * Jefferson Dongmo Somtsi : Développement de la structure CityJSON et validation de la visualisation 3D.
 
 * Qarek Mbengmo Donfack :  Développement de la logique d'analyse.
@@ -36,3 +47,4 @@ L'objectif principal est de fusionner des données hétérogènes (vecteurs 2D e
 Question #1 (Optimisation Rendu) : Le format CityJSON génère une géométrie explicite pour chaque arbre, ce qui rend le fichier lourd (> 20 millions d'arbres sur notre zone d'étude) et Qgis plante lors de l'affichage. Peut-on enrgistrer les bâtis en geojson et la végétation exporter en points au format GeoPackage puis les afficher avec la symbologie de modèle 3D de QGIS ?
 Doit-on rediger un rapport pour le projet de session ? 
 
+>>>>>>> e0945b362252caa5ad4d17e7db614d9a9759be03
