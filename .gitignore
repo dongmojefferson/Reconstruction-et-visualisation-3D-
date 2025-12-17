@@ -11,7 +11,11 @@
 *.pdf
 *.csv
 *.qgz
-*.cpg.dbf.prj.shp.qmd
+*.cpg
+*.dbf
+*.prj
+*.shp
+*.qmd
 *.shx
 *.log
 # Ignorer les fichiers systèmes et python
