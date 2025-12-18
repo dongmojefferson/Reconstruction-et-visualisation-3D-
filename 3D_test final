@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+test_pipeline.py - Test pour 3D_test-16-12.py
+Placez ce fichier dans le MÊME DOSSIER que votre script principal
+"""
+
+import os
+import sys
+
+# Ajoutez le dossier courant au path Python
+sys.path.insert(0, os.path.dirname(__file__))
+
+try:
+    # Importez les variables de votre script principal
+    from "3D_test-16-12" import (
+        TARGET_CRS_EPSG,
+        MIN_HEIGHT_BLD,
+        MIN_HEIGHT_TREE,
+        CAMPUS_COORDS,
+        DSM_FILE,
+        DTM_FILE,
+        OSM_FILE,
+        OUT_CITYJSON,
+        OUT_GEOJSON_VEG,
+        main
+    )
+    
+    print("✅ Importation réussie depuis 3D_test-16-12.py")
+    
+    # Exécutez les tests
+    print("\n🧪 LANCEMENT DES TESTS...")
+    
+    # Test 1: Configuration
+    assert TARGET_CRS_EPSG == 26919, f"CRS doit être 26919, pas {TARGET_CRS_EPSG}"
+    assert MIN_HEIGHT_BLD > 0, f"Hauteur bâtiment positive, pas {MIN_HEIGHT_BLD}"
+    assert MIN_HEIGHT_TREE > 0, f"Hauteur végétation positive, pas {MIN_HEIGHT_TREE}"
+    print("✅ Configuration valide")
+    
+    # Test 2: Coordonnées
+    assert len(CAMPUS_COORDS) == 4, f"4 points requis, pas {len(CAMPUS_COORDS)}"
+    print(f"✅ {len(CAMPUS_COORDS)} points définis")
+    
+    # Test 3: Chemins
+    base_path = r"F:\GMQ710\TD2"  # MODIFIEZ CECI selon votre structure
+    required_files = [DSM_FILE, DTM_FILE, OSM_FILE]
+    
+    print("\n📁 Vérification des fichiers dans:", base_path)
+    for file in required_files:
+        full_path = os.path.join(base_path, file)
+        if os.path.exists(full_path):
+            size_mb = os.path.getsize(full_path) / (1024*1024)
+            print(f"  ✅ {file}: {size_mb:.1f} MB")
+        else:
+            print(f"  ❌ {file}: NON TROUVÉ à {full_path}")
+    
+    print("✅ Noms de fichiers valides")
+    
+    # Test 4: Formats de sortie
+    assert OUT_CITYJSON.endswith('.json'), f"CityJSON: {OUT_CITYJSON}"
+    assert OUT_GEOJSON_VEG.endswith('.geojson'), f"GeoJSON: {OUT_GEOJSON_VEG}"
+    print("✅ Formats de sortie valides")
+    
+    print("\n🎉 TOUS LES TESTS PASSÉS !")
+    
+    # Option pour lancer le traitement
+    launch = input("\nLancer le traitement principal? (o/n): ").lower().strip()
+    if launch in ['o', 'oui', 'y', 'yes']:
+        print("\n🚀 Lancement du traitement...")
+        main()
+    
+except ImportError as e:
+    print(f"❌ Erreur d'importation: {e}")
+    print("\n💡 Assurez-vous que:")
+    print("1. Ce fichier (test_pipeline.py) est dans le MÊME DOSSIER que 3D_test-16-12.py")
+    print("2. Votre script principal s'appelle exactement '3D_test-16-12.py'")
+    print("3. Les variables sont bien définies dans votre script principal")
+    
+    # Vérifier les fichiers dans le dossier
+    current_dir = os.path.dirname(__file__)
+    print(f"\n📁 Fichiers dans {current_dir}:")
+    for f in os.listdir(current_dir):
+        if f.endswith('.py'):
+            print(f"  • {f}")
+    
+except Exception as e:
+    print(f"❌ Erreur lors du test: {e}")
+    import traceback
+    traceback.print_exc()
