@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+test_pipeline.py - Script de validation et de contrôle qualité
+Compatible avec les noms de fichiers complexes (espaces, tirets).
+"""
+
+import os
+import sys
+import importlib.util
+import rasterio  # Nécessaire pour vérifier le CRS
+
+# --- CONFIGURATION UTILISATEUR ---
+# Remplacez par le nom EXACT de votre script principal (avec .py)
+NOM_DU_SCRIPT_PRINCIPAL = "projet.py" 
+# NOM_DU_SCRIPT_PRINCIPAL = "projet.py" # Décommentez si vous avez renommé
+
+# -------------------------------
+
+def charger_module_dynamique(nom_fichier):
+    """Charge un module Python même si son nom contient des tirets"""
+    chemin_fichier = os.path.join(os.path.dirname(__file__), nom_fichier)
+    if not os.path.exists(chemin_fichier):
+        raise FileNotFoundError(f"Le fichier {nom_fichier} est introuvable ici.")
+    
+    spec = importlib.util.spec_from_file_location("module_a_tester", chemin_fichier)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["module_a_tester"] = module
+    spec.loader.exec_module(module)
+    return module
+
+def test_crs_raster(path_fichier, epsg_attendu=26919):
+    """Vérifie le CRS, mais accepte EPSG:None avec un avertissement"""
+    try:
+        with rasterio.open(path_fichier) as src:
+            code_epsg = src.crs.to_epsg() if src.crs else None
+            
+            # Cas 1 : C'est parfait
+            if code_epsg == epsg_attendu:
+                return True, f"EPSG:{code_epsg}"
+            
+            # Cas 2 : Pas d'étiquette, mais on voit des coordonnées projetées (grands nombres)
+            # On laisse passer car le nom du fichier contient 'utm19'
+            elif code_epsg is None:
+                # Vérification rapide si les coordonnées semblent être en UTM (millions de mètres)
+                if src.bounds.top > 1000000: 
+                    return True, "⚠️ EPSG:None détecté, mais coordonnées UTM probables. On continue."
+                else:
+                    return False, "EPSG:None et coordonnées suspectes (trop petites)."
+            
+            # Cas 3 : C'est un mauvais système (ex: EPSG:4326 Lat/Lon)
+            else:
+                return False, f"Trouvé EPSG:{code_epsg} (Attendu: {epsg_attendu})"
+                
+    except Exception as e:
+        return False, f"Erreur lecture: {e}"
+
+def main_test():
+    print(f"🔍 DÉBUT DES TESTS POUR : {NOM_DU_SCRIPT_PRINCIPAL}")
+    print("-" * 50)
+
+    try:
+        # 1. IMPORTATION DU SCRIPT
+        print(f"1️⃣  Tentative d'importation...")
+        script = charger_module_dynamique(NOM_DU_SCRIPT_PRINCIPAL)
+        print("   ✅ Importation réussie ! La syntaxe Python est correcte.")
+
+        # 2. VÉRIFICATION DES VARIABLES CLÉS
+        print(f"\n2️⃣  Vérification de la configuration...")
+        variables_requises = [
+            'BASE_PATH', 'DSM_FILE', 'DTM_FILE', 'OSM_FILE', 
+            'TARGET_CRS', 'MIN_HEIGHT_BLD'
+        ]
+        
+        for var in variables_requises:
+            if hasattr(script, var):
+                valeur = getattr(script, var)
+                print(f"   ✅ {var} = {valeur}")
+            else:
+                print(f"   ❌ ERREUR : Variable '{var}' manquante dans le script !")
+                return # Arrêt critique
+
+        # 3. VÉRIFICATION DES FICHIERS ET DU CRS (NOUVEAU)
+        print(f"\n3️⃣  Vérification des fichiers et systèmes de coordonnées...")
+        
+        # Récupération des chemins depuis le script importé
+        base = getattr(script, 'BASE_PATH')
+        fichiers_rasters = [
+            getattr(script, 'DSM_FILE'),
+            getattr(script, 'DTM_FILE')
+        ]
+        fichier_osm = getattr(script, 'OSM_FILE')
+
+        # Test des Rasters (Existence + CRS)
+        all_files_ok = True
+        for f_name in fichiers_rasters:
+            full_path = os.path.join(base, f_name)
+            if os.path.exists(full_path):
+                # Vérification CRS
+                crs_ok, message = test_crs_raster(full_path, 26919)
+                if crs_ok:
+                    print(f"   ✅ {f_name} : Présent & Valide ({message})")
+                else:
+                    print(f"   ⚠️ {f_name} : Mauvais CRS ! -> {message}")
+                    all_files_ok = False
+            else:
+                print(f"   ❌ {f_name} : INTROUVABLE dans {base}")
+                all_files_ok = False
+
+        # Test du Vecteur OSM
+        path_osm = os.path.join(base, fichier_osm)
+        if os.path.exists(path_osm):
+            print(f"   ✅ {fichier_osm} : Présent")
+        else:
+            print(f"   ❌ {fichier_osm} : INTROUVABLE")
+            all_files_ok = False
+
+        # 4. CONCLUSION
+        print("-" * 50)
+        if all_files_ok:
+            print("🎉 TOUS LES FEUX SONT VERTS ! Vous pouvez lancer le traitement.")
+            lancer = input("\n Voulez-vous exécuter le script principal maintenant ? (o/n) : ")
+            if lancer.lower() == 'o':
+                print("\n🚀 Lancement du script principal...\n")
+                if hasattr(script, 'process_campus'):
+                    script.process_campus()
+                elif hasattr(script, 'main'):
+                    script.main()
+                else:
+                    print("❌ Impossible de trouver une fonction 'main()' ou 'process_campus()' à lancer.")
+        else:
+            print("⛔ CORRIGEZ LES ERREURS ROUGES AVANT DE LANCER LE TRAITEMENT.")
+
+    except ImportError as e:
+        print(f"❌ Erreur critique d'importation : {e}")
+    except Exception as e:
+        print(f"❌ Une erreur inattendue est survenue : {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main_test()
