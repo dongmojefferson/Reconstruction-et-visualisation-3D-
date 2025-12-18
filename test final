@@ -72,8 +72,8 @@ try:
 except ImportError as e:
     print(f"❌ Erreur d'importation: {e}")
     print("\n💡 Assurez-vous que:")
-    print("1. Ce fichier (test_pipeline.py) est dans le MÊME DOSSIER que 3D_test-16-12.py")
-    print("2. Votre script principal s'appelle exactement '3D_test-16-12.py'")
+    print("1. Ce fichier (test_projet.py) est dans le MÊME DOSSIER que projet.py")
+    print("2. Votre script principal s'appelle exactement 'projet.py'")
     print("3. Les variables sont bien définies dans votre script principal")
     
     # Vérifier les fichiers dans le dossier
