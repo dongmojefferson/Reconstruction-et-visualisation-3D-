@@ -1,47 +1,47 @@
 # GMQ710 – Reconstruction 3D Sémantique du Campus de l'UdeS (CityJSON)
 
 ## Objectifs
-Ce projet vise à développer un pipeline de traitement géospatial entièrement automatisé en Python capable de produire une maquette numérique 3D (Jumeau Numérique) du campus de l'Université de Sherbrooke.
+Ce projet a permis de développer un pipeline de traitement géospatial automatisé en Python pour produire une maquette numérique 3D (Jumeau Numérique) du campus de l'Université de Sherbrooke.
 
-L'objectif principal est de fusionner des données hétérogènes (vecteurs 2D et rasters d'élévation) pour générer une scène 3D sémantique standardisée. Le script doit :
-* Calculer précisément la hauteur des bâtiments (LoD1) par analyse zonale.
-* Reconstituer la végétation dense (forêt) et les arbres isolés.
-* Exporter les bâtiments au format CityJSON et la végétation en GeoJSON pour assurer l'interopérabilité et l'optimisation des performances.
+L'objectif principal est la fusion de données hétérogènes pour générer une scène 3D sémantique :
+* **Bâtiments** : Calcul de la hauteur (LoD1) par analyse zonale et extrusion.
+* **Végétation** : Identification de la canopée et des arbres isolés.
+* **Optimisation** : Exportation hybride (CityJSON/GeoJSON) pour garantir la fluidité de l'affichage 3D.
 
 ## Données utilisées
 | Source | Type | Format | Utilité |
 | :--- | :--- | :--- | :--- |
-| **MNEHR (MNS)** | Raster (1 m) | GeoTIFF | Modèle Numérique de Surface : fournit l'altitude des toits et de la canopée. |
-| **MNEHR (MNT)** | Raster (1 m) | GeoTIFF | Modèle Numérique de Terrain : fournit l'altitude du sol nu (Z). |
-| **OpenStreetMap** | Vecteur | GeoJSON | Empreintes 2D des bâtiments utilisées comme base pour l'extrusion. |
+| **MNEHR (MNS)** | Raster (1 m) | GeoTIFF | Modèle Numérique de Surface (altitude des sommets). |
+| **MNEHR (MNT)** | Raster (1 m) | GeoTIFF | Modèle Numérique de Terrain (altitude du sol nu). |
+| **OpenStreetMap** | Vecteur | GeoJSON | Empreintes 2D des bâtiments pour l'extrusion. |
 
-## Approche / Méthodologie finale
-Pour réaliser le projet, nous avons implémenté une approche algorithmique par soustraction et analyse spatiale rigoureuse :
+## Méthodologie et Script Final
+L'approche algorithmique suit ces étapes clés :
+1. **Prétraitement** : Reprojection uniforme en NAD83 / UTM Zone 19N (EPSG:26919).
+2. **Calcul du nDSM** : Génération du modèle de hauteur normalisé ($MNS - MNT$).
+3. **Modélisation des Bâtis (CityJSON 2.0)** : 
+    - Analyse zonale (percentile 95) pour une hauteur robuste.
+    - Gestion des **MultiPolygons** pour la validité géométrique.
+    - Exportation de 45 bâtiments en format `Solid`.
+4. **Extraction de la Végétation (GeoJSON)** : 
+    - Filtrage des pixels > 2.5m hors empreintes bâties.
+    - **Dédoublonnage spatial** (distance min. 3.5m) pour isoler les individus.
+    - Exportation de 3 264 arbres en points 3D (X, Y, Z + attribut hauteur).
 
-* **Étape 1 : Prétraitement et Harmonisation.** Chargement des données et reprojection uniforme dans le système de coordonnées projeté local (NAD83 / UTM Zone 19N - EPSG:26919).
-* **Étape 2 : Calcul du nDSM.** Création du Modèle de Hauteur Normalisé par l'opération matricielle $MNS - MNT$ pour obtenir la hauteur réelle des objets hors-sol.
-* **Étape 3 : Modélisation des Bâtiments (CityJSON).** - Analyse zonale pour extraire le percentile 95 des hauteurs du nDSM par empreinte.
-    - Gestion avancée des géométries : traitement des **MultiPolygones** pour assurer la validité des solides.
-    - Génération de géométries de type `Solid` (incluant planchers, murs et toits) avec extrusion à partir de l'altitude du MNT.
-* **Étape 4 : Extraction de la Végétation (GeoJSON).** - Filtrage du nDSM pour identifier les pixels de végétation (Hauteur > 2.5m) situés à l'extérieur des zones bâties.
-    - Conversion des centroïdes de pixels en points 3D pour éviter la surcharge géométrique des modèles 3D explicites.
-* **Étape 5 : Structuration et Exportation.** Écriture des données dans une structure hybride : CityJSON pour les bâtis (sémantique riche) et GeoJSON pour la végétation (performance de rendu).
+## Validation et Tests
+Pour garantir la robustesse du pipeline, un script de test (`test_pipeline.py`) a été implémenté. Il permet de :
+* **Vérifier l'intégrité des imports** et de la syntaxe Python.
+* **Valider la présence des fichiers sources** (DSM, DTM, OSM) et leurs chemins.
+* **Contrôler le système de coordonnées (CRS)** : Alerte si l'étiquette EPSG est absente tout en vérifiant la validité des coordonnées projetées.
+* **Prévenir les échecs** avant le lancement du traitement lourd.
 
-## Outils et bibliothèques utilisés
+## Outils et bibliothèques
 * **Langage** : Python 3.8
-* **Bibliothèques de traitement spatial** :
-    - `rasterio` : Lecture et manipulation des rasters MNS/MNT.
-    - `geopandas` : Gestion des couches vectorielles et des systèmes de coordonnées.
-    - `shapely` : Manipulation des géométries (Polygon, MultiPolygon) et calculs topologiques.
-    - `fiona` : Moteur de lecture/écriture pour les formats vectoriels.
-* **Bibliothèques de calcul et structure** :
-    - `numpy` : Opérations matricielles rapides sur les données d'élévation.
-    - `json` : Structuration et encodage du dictionnaire CityJSON.
-    - `os` : Gestion des chemins d'accès et des fichiers.
+* **Bibliothèques** : `rasterio`, `geopandas`, `shapely`, `fiona`, `numpy`, `json`.
 
-## Répartition des tâches dans l’équipe
-* **Jefferson Dongmo Somtsi** : Développement de la structure CityJSON, gestion des MultiPolygones, résolution des erreurs topologiques et gestion du dépôt Git.
-* **Qarek Mbengmo Donfack** : Développement de la logique d'analyse zonale, calcul des statistiques du nDSM et filtrage de la végétation.
+## Répartition des tâches
+* **Jefferson Dongmo Somtsi** : Développement de la structure CityJSON, gestion des géométries complexes, résolution des conflits Git et intégration du script de test.
+* **Qarek Mbengmo Donfack** : Logique d'analyse spatiale, statistiques du nDSM et filtrage de la végétation.
 
 ## Questions résolues
-**Optimisation du Rendu (Question #1) :** Le format CityJSON avec géométries explicites pour chaque arbre rendait le fichier trop lourd pour QGIS. Nous avons adopté une stratégie d'exportation hybride : les bâtiments sont en CityJSON, tandis que la végétation est exportée en points au format GeoJSON. Cela permet d'utiliser la symbologie 3D de QGIS pour représenter des milliers d'arbres de manière fluide.
+**Optimisation du rendu** : Le problème de lourdeur a été résolu par l'exportation de la végétation en GeoJSON. Cela permet à QGIS d'utiliser la symbologie 3D native, affichant les milliers d'arbres de manière fluide sans saturer la mémoire vive, contrairement à un export géométrique explicite en CityJSON.
