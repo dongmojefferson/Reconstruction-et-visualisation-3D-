@@ -6,15 +6,21 @@
 *.gpkg
 *.city.json
 *.json
-*.aux.xml
+*.aux
+*.xml
+*.txt
+*.jpeg
 *.rar
 *.zip
 *.obj
 *.mtl
 *.png
 *.jpg
+*.jpg.swatch
 */Modèle obj/
 *.ma
+*.ma.swatches
+*.png.swatch
 
 # Ignorer les fichiers systèmes et python
 __pycache__/
@@ -30,6 +36,7 @@ __pycache__/
 *.csv
 *.dbf
 *.shx
+*.shp
 *.prj
 *.cpg
 *.qmd
